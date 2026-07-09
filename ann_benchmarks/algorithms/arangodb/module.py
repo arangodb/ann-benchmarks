@@ -178,9 +178,9 @@ class ArangoDB(BaseANN):
     def get_memory_usage(self):
         if self._db is None:
             return 0
-        figures = self._coll.figures()
+        figures = self._coll.statistics()
         # bytes -> kilobytes, to match the units used by other modules
-        return figures["figures"]["documentsSize"] / 1024
+        return figures["documents_size"] / 1024
 
     def done(self):
         if self._proc is not None:
