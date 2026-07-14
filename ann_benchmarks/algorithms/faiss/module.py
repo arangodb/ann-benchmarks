@@ -13,7 +13,9 @@ class Faiss(BaseANN):
         if self._metric == "angular":
             v /= numpy.linalg.norm(v)
         D, I = self.index.search(numpy.expand_dims(v, axis=0).astype(numpy.float32), n)
-        return I[0]
+        # faiss pads with -1 when a query's probed cells hold fewer than n
+        # candidates; drop them so we don't return duplicate/invalid ids.
+        return [l for l in I[0] if l != -1]
 
     def batch_query(self, X, n):
         if self._metric == "angular":

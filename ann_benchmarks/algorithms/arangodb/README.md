@@ -15,6 +15,72 @@ Jaccard / hamming / dot datasets will not work with this index.
 
 Requires ArangoDB **>= 3.12.4** started with `--vector-index=true`.
 
+## Composite indexes (faiss factory strings)
+
+In addition to the default IVF-flat index, the module can build any faiss IVF
+index expressed as a **factory string** via the index's `factory` parameter.
+This is used to benchmark an **HNSW coarse quantizer** combined with
+**scalar (SQ)** or **product (PQ)** quantization of the residuals — the
+`IVF_HNSW,SQ` / `IVF_HNSW,PQ` families.
+
+Key rules (enforced by ArangoDB / faiss):
+
+- The factory string uses `{}` as a placeholder for `nLists`; ArangoDB
+  substitutes the resolved `nLists` before calling `index_factory`, so the
+  factory's implied nlist always agrees with the `nLists` param. Example:
+  `IVF{}_HNSW32,SQ8` with `nLists=4096` → `IVF4096_HNSW32,SQ8`.
+- The factory **must** resolve to an IVF index, hence the required `IVF{}_`
+  prefix. `HNSW32` is the coarse-quantizer graph degree (`M`).
+- **Scalar quantization** (`SQ8`, `SQ6`, `SQ4`, `SQfp16`) works for **any**
+  dimension.
+- **Product quantization** (`PQ<m>`) requires the subquantizer count `m` to
+  **divide the vector dimension**. So PQ configs are dataset-specific:
+  - `glove-100-angular` (d=100): `m ∈ {20, 25, 50}` (also 2, 4, 5, 10).
+  - `sift-128-euclidean` (d=128): `m ∈ {16, 32, 64}` (also 8).
+
+  A PQ string whose `m` does not divide the dimension makes the index build
+  throw, which aborts the run — so pick the entry that matches your dataset.
+
+The `nProbe` query-time sweep applies unchanged; the HNSW coarse quantizer only
+changes how the `nProbe` lists are *selected*, not how many are scanned.
+
+### Available config entries
+
+| `--algorithm` name              | Index family        | Datasets              | Quantizers        |
+| ------------------------------- | ------------------- | --------------------- | ----------------- |
+| `arangodb`                      | IVF-flat (default)  | any euclidean/angular | —                 |
+| `arangodb-ivf-hnsw-sq`          | IVF + HNSW + SQ     | any euclidean/angular | `SQ8`, `SQ4`      |
+| `arangodb-ivf-hnsw-pq-glove`    | IVF + HNSW + PQ     | `glove-100-angular`   | `PQ25`, `PQ50`    |
+| `arangodb-ivf-hnsw-pq-sift`     | IVF + HNSW + PQ     | `sift-128-euclidean`  | `PQ32`, `PQ64`    |
+
+The composite entries sweep `nLists ∈ {1024, 4096, 16384}` (HNSW coarse
+quantization pays off at large `nLists`) × two quantizer settings ×
+`nProbe ∈ {1, 5, 10, 20, 50, 100, 200}`. Edit `config.yml` to trim or extend
+these — each extra combination is a full index build.
+
+> **Note:** the `factory` parameter requires an `arangod` build that supports it
+> (the vector-index `factory` field). Verify your image/binary includes it
+> before running the composite entries.
+
+### Running the composite sweeps
+
+```bash
+# scalar quantization — either dataset
+python run.py --local --algorithm arangodb-ivf-hnsw-sq \
+  --dataset glove-100-angular --runs 3
+python run.py --local --algorithm arangodb-ivf-hnsw-sq \
+  --dataset sift-128-euclidean --runs 3
+
+# product quantization — match the entry to the dataset dimension
+python run.py --local --algorithm arangodb-ivf-hnsw-pq-glove \
+  --dataset glove-100-angular --runs 3
+python run.py --local --algorithm arangodb-ivf-hnsw-pq-sift \
+  --dataset sift-128-euclidean --runs 3
+```
+
+Plot every ArangoDB curve for a dataset together by passing the algorithm names
+to `plot.py` (or just plot the whole dataset, which includes all of them).
+
 ## Reference hardware
 
 The official ann-benchmarks results (the plots in the repo `README.md`) were

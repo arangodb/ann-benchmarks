@@ -1,5 +1,6 @@
 float:
   any:
+  # Default IVF-flat index: nLists build sweep, nProbe query sweep.
   - base_args: ['@metric']
     constructor: ArangoDB
     disabled: false
@@ -10,3 +11,55 @@ float:
       base:
         args: [[32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]]
         query_args: [[1, 5, 10, 50, 100, 200]]
+
+  # Composite index: HNSW coarse quantizer + scalar quantization of the
+  # residuals. Dimension-agnostic, so the same sweep works for both
+  # glove-100-angular and sift-128-euclidean.
+  #   run: python run.py --local --algorithm arangodb-ivf-hnsw-sq --dataset <ds>
+  - base_args: ['@metric']
+    constructor: ArangoDB
+    disabled: false
+    docker_tag: ann-benchmarks-arangodb
+    module: ann_benchmarks.algorithms.arangodb
+    name: arangodb-ivf-hnsw-sq
+    run_groups:
+      sq:
+        args:
+          - [1024, 4096, 16384]
+          - ["IVF{}_HNSW32,SQ8", "IVF{}_HNSW32,SQ4"]
+        query_args: [[1, 5, 10, 20, 50, 100, 200]]
+
+  # Composite index: HNSW coarse quantizer + product quantization, sized for
+  # glove-100-angular (dimension 100). PQ<m> requires m to divide the
+  # dimension: 100 = 20*5 = 25*4 = 50*2.
+  #   run: python run.py --local --algorithm arangodb-ivf-hnsw-pq-glove \
+  #        --dataset glove-100-angular
+  - base_args: ['@metric']
+    constructor: ArangoDB
+    disabled: false
+    docker_tag: ann-benchmarks-arangodb
+    module: ann_benchmarks.algorithms.arangodb
+    name: arangodb-ivf-hnsw-pq-glove
+    run_groups:
+      pq:
+        args:
+          - [1024, 4096, 16384]
+          - ["IVF{}_HNSW32,PQ25", "IVF{}_HNSW32,PQ50"]
+        query_args: [[1, 5, 10, 20, 50, 100, 200]]
+
+  # Composite index: HNSW coarse quantizer + product quantization, sized for
+  # sift-128-euclidean (dimension 128). 128 = 16*8 = 32*4 = 64*2.
+  #   run: python run.py --local --algorithm arangodb-ivf-hnsw-pq-sift \
+  #        --dataset sift-128-euclidean
+  - base_args: ['@metric']
+    constructor: ArangoDB
+    disabled: false
+    docker_tag: ann-benchmarks-arangodb
+    module: ann_benchmarks.algorithms.arangodb
+    name: arangodb-ivf-hnsw-pq-sift
+    run_groups:
+      pq:
+        args:
+          - [1024, 4096, 16384]
+          - ["IVF{}_HNSW32,PQ32", "IVF{}_HNSW32,PQ64"]
+        query_args: [[1, 5, 10, 20, 50, 100, 200]]

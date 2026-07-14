@@ -6,6 +6,15 @@ tunable is `nLists` (number of Voronoi cells the vectors are clustered into);
 the query-time tunable is `nProbe` (how many of those cells are scanned per
 query). Larger nProbe -> higher recall, lower QPS.
 
+Optionally a faiss `factory` string can be supplied to benchmark composite
+indexes (e.g. an HNSW coarse quantizer with scalar/product quantization of the
+residuals: `IVF{}_HNSW32,SQ8` or `IVF{}_HNSW32,PQ64`). The `{}` placeholder is
+replaced by ArangoDB with the resolved `nLists`, so the factory's implied nlist
+always agrees with the `nLists` param. The factory must resolve to an IVF index
+(hence the `IVF{}_` prefix). Note that product quantization (`PQ<m>`) requires
+the subquantizer count `m` to divide the vector dimension, so PQ factory strings
+are dataset-specific while scalar quantization (`SQ*`) works for any dimension.
+
 Requires ArangoDB >= 3.12.4 started with `--experimental-vector-index true`.
 
 Connection is configured via environment variables so the same module works
@@ -17,6 +26,12 @@ with `run.py --local`) or is launched locally by this module:
     ANN_BENCHMARKS_ARANGO_USER      default: root
     ANN_BENCHMARKS_ARANGO_PASSWORD  default: "" (empty)
     ANN_BENCHMARKS_ARANGO_DB        default: _system
+    ANN_BENCHMARKS_ARANGO_TIMEOUT   default: 3600 (seconds)
+
+Building the vector index runs synchronously (inBackground: False) and trains
+the IVF quantizer, which on a full training set takes far longer than the
+python-arango default read timeout of 60s. ANN_BENCHMARKS_ARANGO_TIMEOUT raises
+that limit so the build request is not cut off mid-flight.
 
 If ANN_BENCHMARKS_ARANGO_START_SERVICE is truthy (default: false), this module
 launches a local single-server `arangod` itself, which requires the `arangod`
@@ -58,7 +73,7 @@ class ArangoDB(BaseANN):
     # so we keep a fixed default here.
     TRAINING_ITERATIONS = 25
 
-    def __init__(self, metric, n_list):
+    def __init__(self, metric, n_list, factory=None):
         if metric not in METRIC_PROPERTIES:
             raise RuntimeError(
                 f"unknown metric {metric}; supported: {sorted(METRIC_PROPERTIES)}"
@@ -66,6 +81,9 @@ class ArangoDB(BaseANN):
         self._metric = metric
         self._arango_metric, self._func, self._sort_dir = METRIC_PROPERTIES[metric]
         self._n_lists = n_list
+        # Optional faiss factory string for composite indexes (e.g.
+        # "IVF{}_HNSW32,SQ8"). None -> the default IVF-flat index.
+        self._factory = factory
         self._training_iterations = self.TRAINING_ITERATIONS
         self._n_probe = None
         self._proc = None
@@ -76,10 +94,11 @@ class ArangoDB(BaseANN):
         self._user = _env("USER", "root")
         self._password = _env("PASSWORD", "") or ""
         self._db_name = _env("DB", "_system")
+        self._request_timeout = int(_env("TIMEOUT", "3600"))
 
     def _connect(self):
         url = f"http://{self._host}:{self._port}"
-        client = ArangoClient(hosts=url)
+        client = ArangoClient(hosts=url, request_timeout=self._request_timeout)
         last_err = None
         for _ in range(120):
             try:
@@ -141,21 +160,30 @@ class ArangoDB(BaseANN):
         # data has been loaded. add_index passes the raw definition through to
         # POST /_api/index, which is required because the vector index type is
         # not covered by python-arango's typed helpers.
-        print("creating vector index (nLists=%d)..." % self._n_lists)
+        if self._factory is None:
+            print("creating vector index (nLists=%d)..." % self._n_lists)
+        else:
+            print(
+                "creating vector index (nLists=%d, factory=%s)..."
+                % (self._n_lists, self._factory)
+            )
         sys.stdout.flush()
         index_start = time.time()
+        params = {
+            "metric": self._arango_metric,
+            "dimension": dim,
+            "nLists": self._n_lists,
+            "trainingIterations": self._training_iterations,
+        }
+        if self._factory is not None:
+            params["factory"] = self._factory
         coll.add_index(
             {
                 "type": "vector",
                 "name": "vector_idx",
                 "fields": ["vector"],
                 "inBackground": False,
-                "params": {
-                    "metric": self._arango_metric,
-                    "dimension": dim,
-                    "nLists": self._n_lists,
-                    "trainingIterations": self._training_iterations,
-                },
+                "params": params,
             }
         )
         print("index built in %.3f sec" % (time.time() - index_start))
@@ -192,7 +220,8 @@ class ArangoDB(BaseANN):
             self._proc = None
 
     def __str__(self):
+        factory = self._factory if self._factory is not None else "IVF,Flat"
         return (
-            f"ArangoDB(metric={self._arango_metric}, "
+            f"ArangoDB(metric={self._arango_metric}, factory={factory}, "
             f"nLists={self._n_lists}, nProbe={self._n_probe})"
         )
