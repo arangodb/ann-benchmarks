@@ -577,6 +577,87 @@ def dbpedia_entities_openai_1M(out_fn, n = None):
 
     write_output(X_train, X_test, out_fn, "angular")
 
+def hotpotqa(out_fn: str, count: int = 100) -> None:
+    """Assembles the private HotpotQA full-wiki dataset into ann-benchmarks format.
+
+    The source ships as three separate HDF5 files (base corpus, queries and
+    exact ground truth). It is private and large (~64 GB base), so instead of
+    downloading or copying the vectors, this points ``train``/``test`` at the
+    source files via HDF5 external links and only materialises the (small)
+    ``neighbors`` and ``distances`` arrays.
+
+    The directory holding the three ``hotpotqa_*.h5`` files is taken from
+    ANN_BENCHMARKS_HOTPOTQA_DIR (default: /home/jbajic/Downloads/ML-dataset).
+
+    Two conversions bridge the source layout to ann-benchmarks conventions:
+      * neighbors: the source stores 1-based ``chunk_id`` (== base_row + 1);
+        ann-benchmarks needs 0-based row indices into ``train``, so subtract 1.
+      * distances: the source stores cosine *similarity* (descending); the
+        ``angular`` metric here is a *distance* ``1 - cosine`` (ascending).
+    """
+    src_dir = os.environ.get(
+        "ANN_BENCHMARKS_HOTPOTQA_DIR", "/home/jbajic/Downloads/ML-dataset"
+    )
+    base_fn = os.path.join(src_dir, "hotpotqa_base.h5")
+    query_fn = os.path.join(src_dir, "hotpotqa_query.h5")
+    gt_fn = os.path.join(src_dir, "hotpotqa_groundtruth.h5")
+    for fn in (base_fn, query_fn, gt_fn):
+        if not os.path.exists(fn):
+            raise FileNotFoundError(
+                f"missing {fn}; set ANN_BENCHMARKS_HOTPOTQA_DIR to the directory "
+                "holding hotpotqa_base.h5, hotpotqa_query.h5 and "
+                "hotpotqa_groundtruth.h5"
+            )
+
+    with h5py.File(base_fn, "r") as base, h5py.File(query_fn, "r") as query, \
+            h5py.File(gt_fn, "r") as gt:
+        dimension = int(base.attrs["dim"])
+
+        # Ground-truth is stored dimension-specifically under /large_<dim>.
+        source_dim = int(gt.attrs.get("source_dim", dimension))
+        group = f"large_{source_dim}"
+        if source_dim != dimension:
+            raise ValueError(
+                f"ground truth dim {source_dim} != base dim {dimension}; the "
+                "exact neighbors change with dimensionality and cannot be reused"
+            )
+
+        # Fail fast on the two invariants the offset fix relies on: query rows
+        # must align with ground-truth rows, and chunk_id must equal base_row+1.
+        base_ids = base["ids"][:]
+        expected = numpy.arange(1, base_ids.shape[0] + 1, dtype=base_ids.dtype)
+        if not numpy.array_equal(base_ids, expected):
+            raise ValueError(
+                "base ids are not the contiguous sequence 1..N; the "
+                "chunk_id-1 -> row mapping no longer holds"
+            )
+        if not numpy.array_equal(query["ids"][:], gt["query_ids"][:]):
+            raise ValueError(
+                "query ids do not match ground-truth query_ids row-for-row"
+            )
+
+        k = int(gt.attrs.get("k", gt[f"{group}/neighbors"].shape[1]))
+        if count > k:
+            raise ValueError(f"count {count} exceeds available ground truth k={k}")
+
+        neighbors = gt[f"{group}/neighbors"][:, :count].astype(numpy.int32) - 1
+        distances = 1.0 - gt[f"{group}/scores"][:, :count].astype(numpy.float32)
+
+        with h5py.File(out_fn, "w") as f:
+            f.attrs["type"] = "dense"
+            f.attrs["distance"] = "angular"
+            f.attrs["dimension"] = dimension
+            f.attrs["point_type"] = "float"
+            # External links keep the ~64 GB base and ~1.2 GB queries in place
+            # rather than duplicating them into data/.
+            f["train"] = h5py.ExternalLink(os.path.abspath(base_fn), "/vectors")
+            f["test"] = h5py.ExternalLink(os.path.abspath(query_fn), "/vectors")
+            f.create_dataset("neighbors", data=neighbors)
+            f.create_dataset("distances", data=distances)
+    print(f"wrote {out_fn}: {neighbors.shape[0]} queries, dim {dimension}, "
+          f"count {count} (train/test linked from {src_dir})")
+
+
 def coco(out_fn: str, kind: str):
     assert kind in ('t2i', 'i2i')
 
@@ -627,6 +708,7 @@ DATASETS: Dict[str, Callable[[str], None]] = {
     "movielens20m-jaccard": movielens20m,
     "coco-i2i-512-angular": lambda out_fn: coco(out_fn, "i2i"),
     "coco-t2i-512-angular": lambda out_fn: coco(out_fn, "t2i"),
+    "hotpotqa-3072-angular": lambda out_fn: hotpotqa(out_fn, 100),
 }
 
 DATASETS.update({
