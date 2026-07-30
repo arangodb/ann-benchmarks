@@ -27,6 +27,8 @@ with `run.py --local`) or is launched locally by this module:
     ANN_BENCHMARKS_ARANGO_PASSWORD  default: "" (empty)
     ANN_BENCHMARKS_ARANGO_DB        default: _system
     ANN_BENCHMARKS_ARANGO_TIMEOUT   default: 3600 (seconds)
+    ANN_BENCHMARKS_ARANGO_BATCH_WORKERS  default: 20 (parallel query clients
+                                         used in --batch mode; see batch_query)
 
 Building the vector index runs synchronously (inBackground: False) and trains
 the IVF quantizer, which on a full training set takes far longer than the
@@ -41,7 +43,9 @@ binary to be on PATH.
 import os
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from arango import ArangoClient
@@ -88,6 +92,13 @@ class ArangoDB(BaseANN):
         self._n_probe = None
         self._proc = None
         self._db = None
+        # Batch (parallel-client) query state. batch_query drives the queries
+        # from a pool of worker threads, each with its own connection, so QPS
+        # reflects concurrent server throughput rather than single-client
+        # latency. Results are cached for get_batch_results.
+        self._batch_results = None
+        self._tls = threading.local()
+        self._executor = None
 
         self._host = _env("HOST", "127.0.0.1")
         self._port = int(_env("PORT", "8529"))
@@ -95,6 +106,7 @@ class ArangoDB(BaseANN):
         self._password = _env("PASSWORD", "") or ""
         self._db_name = _env("DB", "_system")
         self._request_timeout = int(_env("TIMEOUT", "3600"))
+        self._batch_workers = int(_env("BATCH_WORKERS", "20"))
 
     def _connect(self):
         url = f"http://{self._host}:{self._port}"
@@ -138,23 +150,47 @@ class ArangoDB(BaseANN):
         db = self._db
         dim = X.shape[1]
 
+        # The base data only depends on the dataset, not on the index
+        # parameters, so across a parameter sweep it is loaded once and reused:
+        # each sweep step drops and rebuilds only the vector index, never the
+        # collection. Reloading millions of high-dimensional vectors per step
+        # dominated the runtime otherwise. Data is (re)inserted only when the
+        # collection is missing or holds a different row count than the dataset.
         if db.has_collection("items"):
-            db.delete_collection("items")
-        coll = db.create_collection("items")
+            coll = db.collection("items")
+        else:
+            coll = db.create_collection("items")
 
-        print("inserting %d rows..." % len(X))
-        sys.stdout.flush()
-        insert_start = time.time()
-        batch = []
-        batch_size = 10000
-        for i, vec in enumerate(X):
-            batch.append({"_key": str(i), "vector": vec.tolist()})
-            if len(batch) >= batch_size:
+        existing = coll.count()
+        if existing == len(X):
+            print("reusing %d already-loaded rows, skipping insert" % existing)
+        else:
+            if existing != 0:
+                print(
+                    "collection has %d rows but dataset has %d; reloading"
+                    % (existing, len(X))
+                )
+                coll.truncate()
+            print("inserting %d rows..." % len(X))
+            sys.stdout.flush()
+            insert_start = time.time()
+            batch = []
+            batch_size = 10000
+            for i, vec in enumerate(X):
+                batch.append({"_key": str(i), "vector": vec.tolist()})
+                if len(batch) >= batch_size:
+                    coll.insert_many(batch)
+                    batch = []
+            if batch:
                 coll.insert_many(batch)
-                batch = []
-        if batch:
-            coll.insert_many(batch)
-        print("inserted in %.3f sec" % (time.time() - insert_start))
+            print("inserted in %.3f sec" % (time.time() - insert_start))
+
+        # A previous sweep step may have left a vector index behind; drop it so
+        # the current nLists/factory takes effect. The data underneath is
+        # untouched.
+        for index in coll.indexes():
+            if index.get("name") == "vector_idx":
+                coll.delete_index(index["id"])
 
         # Creating the index trains the IVF quantizer, so it must run after the
         # data has been loaded. add_index passes the raw definition through to
@@ -203,6 +239,50 @@ class ArangoDB(BaseANN):
         )
         return [int(key) for key in cursor]
 
+    def _thread_db(self):
+        # python-arango's HTTP session is not safe to share across threads, so
+        # each worker thread lazily builds and caches its own connection.
+        db = getattr(self._tls, "db", None)
+        if db is None:
+            url = f"http://{self._host}:{self._port}"
+            client = ArangoClient(hosts=url, request_timeout=self._request_timeout)
+            db = client.db(
+                self._db_name, username=self._user, password=self._password
+            )
+            self._tls.client = client  # keep the client (and its session) alive
+            self._tls.db = db
+        return db
+
+    def batch_query(self, X, n):
+        # Drive all queries concurrently. run_individual_query times the whole
+        # call as wall-clock and (since get_batch_latencies is intentionally
+        # not implemented) derives QPS as len(X) / wall_clock, i.e. aggregate
+        # throughput under self._batch_workers concurrent clients.
+        query = self._query
+        count = int(n)
+        total = len(X)
+        progress = {"done": 0}
+        lock = threading.Lock()
+
+        def run_one(v):
+            db = self._thread_db()
+            cursor = db.aql.execute(query, bind_vars={"qp": v.tolist(), "n": count})
+            keys = [int(key) for key in cursor]
+            with lock:
+                progress["done"] += 1
+                if progress["done"] % 5000 == 0:
+                    print("processed %d/%d queries..." % (progress["done"], total))
+                    sys.stdout.flush()
+            return keys
+
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self._batch_workers)
+        # executor.map preserves input order, so results line up with X.
+        self._batch_results = list(self._executor.map(run_one, X))
+
+    def get_batch_results(self):
+        return self._batch_results
+
     def get_memory_usage(self):
         if self._db is None:
             return 0
@@ -211,6 +291,9 @@ class ArangoDB(BaseANN):
         return figures["documents_size"] / 1024
 
     def done(self):
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
         if self._proc is not None:
             self._proc.terminate()
             try:
