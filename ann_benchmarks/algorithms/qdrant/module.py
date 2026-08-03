@@ -91,7 +91,7 @@ class Qdrant(BaseANN):
             vectors=X,
             ids=list(range(X.shape[0])),
             batch_size=BATCH_SIZE,
-            parallel=1,
+            parallel=8,
         )
 
         # Re-enabling indexing

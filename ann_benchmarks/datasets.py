@@ -577,7 +577,7 @@ def dbpedia_entities_openai_1M(out_fn, n = None):
 
     write_output(X_train, X_test, out_fn, "angular")
 
-def hotpotqa(out_fn: str, count: int = 100) -> None:
+def hotpotqa(out_fn: str, count: int = 100, n_queries: int = None) -> None:
     """Assembles the private HotpotQA full-wiki dataset into ann-benchmarks format.
 
     The source ships as three separate HDF5 files (base corpus, queries and
@@ -643,6 +643,15 @@ def hotpotqa(out_fn: str, count: int = 100) -> None:
         neighbors = gt[f"{group}/neighbors"][:, :count].astype(numpy.int32) - 1
         distances = 1.0 - gt[f"{group}/scores"][:, :count].astype(numpy.float32)
 
+        # Optionally cap the test set to the first ``n_queries`` queries. The
+        # per-query cost multiplies through every index build and probe/ef
+        # sweep, so trimming the ~98k queries down is the single biggest
+        # runtime lever for a full benchmark.
+        cap = n_queries is not None and n_queries < neighbors.shape[0]
+        if cap:
+            neighbors = neighbors[:n_queries]
+            distances = distances[:n_queries]
+
         with h5py.File(out_fn, "w") as f:
             f.attrs["type"] = "dense"
             f.attrs["distance"] = "angular"
@@ -651,7 +660,12 @@ def hotpotqa(out_fn: str, count: int = 100) -> None:
             # External links keep the ~64 GB base and ~1.2 GB queries in place
             # rather than duplicating them into data/.
             f["train"] = h5py.ExternalLink(os.path.abspath(base_fn), "/vectors")
-            f["test"] = h5py.ExternalLink(os.path.abspath(query_fn), "/vectors")
+            if cap:
+                # An external link can't be sub-ranged, so a capped test set is
+                # materialised (n_queries * dim floats, small).
+                f.create_dataset("test", data=query["/vectors"][:n_queries])
+            else:
+                f["test"] = h5py.ExternalLink(os.path.abspath(query_fn), "/vectors")
             f.create_dataset("neighbors", data=neighbors)
             f.create_dataset("distances", data=distances)
     print(f"wrote {out_fn}: {neighbors.shape[0]} queries, dim {dimension}, "
@@ -709,6 +723,7 @@ DATASETS: Dict[str, Callable[[str], None]] = {
     "coco-i2i-512-angular": lambda out_fn: coco(out_fn, "i2i"),
     "coco-t2i-512-angular": lambda out_fn: coco(out_fn, "t2i"),
     "hotpotqa-3072-angular": lambda out_fn: hotpotqa(out_fn, 100),
+    "hotpotqa-3072-angular-10k": lambda out_fn: hotpotqa(out_fn, 100, 10000),
 }
 
 DATASETS.update({

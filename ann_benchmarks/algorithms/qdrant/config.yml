@@ -2,18 +2,20 @@ float:
   any:
   - base_args: ['@metric']
     constructor: Qdrant
-    disabled: true
+    disabled: false
     docker_tag: ann-benchmarks-qdrant
     module: ann_benchmarks.algorithms.qdrant
     name: qdrant
     run_groups:
-      default:
-        args: [
-          ['none', 'scalar', 'binary'], #quantization
-          [ 8, 16, 24, 32, 40, 48, 64, 72 ], #m
-          [ 64, 128, 256, 512 ], #ef_construct
-        ]
-        query_args: [
-          [null, 8, 16, 32, 64, 128, 256, 512, 768], #hnsw_ef
-          [True, False], # re-score
-        ]
+      # Single scalar-quantized (int8) HNSW build, comparable to ArangoDB's
+      # SQ8 run. Only the query-time hnsw_ef is swept. The full default matrix
+      # (3 quantizations x 8 m x 4 ef_construct = 96 builds) is intractable on
+      # a 5.2M x 3072 dataset; widen this once a first result lands.
+      scalar:
+        args:
+          - ['scalar']   # quantization: int8 scalar
+          - [16]         # m: HNSW out-degree
+          - [128]        # ef_construct
+        query_args:
+          - [64, 128, 256, 512]   # hnsw_ef sweep (recall/QPS trade-off)
+          - [true]                # rescore with full-precision vectors
