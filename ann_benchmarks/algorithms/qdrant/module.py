@@ -1,5 +1,4 @@
-from time import sleep, time
-from typing import Iterable, List, Any
+from time import sleep
 
 import numpy as np
 from qdrant_client import QdrantClient
@@ -34,8 +33,6 @@ class Qdrant(BaseANN):
         self._quantization_mode = quantization
         self._grpc = True
         self._search_params = {"hnsw_ef": None, "rescore": True}
-        self.batch_results = []
-        self.batch_latencies = []
 
         qdrant_client_params = {
             "host": "localhost",
@@ -142,61 +139,6 @@ class Qdrant(BaseANN):
         search_result = self._client.grpc_points.Search(search_request, timeout=TIMEOUT)
         result_ids = [point.id.num for point in search_result.result]
         return result_ids
-
-    def batch_query(self, X, n):
-        def iter_batches(iterable, batch_size) -> Iterable[List[Any]]:
-            """Iterate over `iterable` in batches of size `batch_size`."""
-            batch = []
-            for item in iterable:
-                batch.append(item)
-                if len(batch) >= batch_size:
-                    yield batch
-                    batch = []
-            if batch:
-                yield batch
-
-        quantization_search_params = grpc.QuantizationSearchParams(
-            ignore=False,
-            rescore=self._search_params["rescore"],
-        )
-
-        search_queries = [
-            grpc.SearchPoints(
-                collection_name=self._collection_name,
-                vector=q.tolist(),
-                limit=n,
-                with_payload=grpc.WithPayloadSelector(enable=False),
-                with_vectors=grpc.WithVectorsSelector(enable=False),
-                params=grpc.SearchParams(
-                    hnsw_ef=self._search_params["hnsw_ef"],
-                    quantization=quantization_search_params,
-                ),
-            )
-            for q in X
-        ]
-
-        self.batch_results = []
-
-        for request_batch in iter_batches(search_queries, BATCH_SIZE):
-            start = time()
-            grpc_res: grpc.SearchBatchResponse = self._client.grpc_points.SearchBatch(
-                grpc.SearchBatchPoints(
-                    collection_name=self._collection_name,
-                    search_points=request_batch,
-                    read_consistency=None,
-                ),
-                timeout=TIMEOUT,
-            )
-            self.batch_latencies.extend([time() - start] * len(request_batch))
-
-            for r in grpc_res.result:
-                self.batch_results.append([hit.id.num for hit in r.result])
-
-    def get_batch_results(self):
-        return self.batch_results
-
-    def get_batch_latencies(self):
-        return self.batch_latencies
 
     def __str__(self):
         hnsw_ef = self._search_params["hnsw_ef"]

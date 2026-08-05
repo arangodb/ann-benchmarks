@@ -12,6 +12,26 @@ float:
         args: [[32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]]
         query_args: [[1, 5, 10, 50, 100, 200]]
 
+  # Pure IVF-flat, sized for the 5.2M-vector hotpotqa corpus: a single
+  # nLists=4096 build (~sqrt(N)) with an nProbe query sweep, mirroring Qdrant's
+  # single-build + query-knob structure for a point-for-point comparison. No
+  # quantization -> full-precision distances within the probed cells. nProbe is
+  # kept well below nLists; high nProbe on small nLists degenerates into a
+  # brute-force full scan of 5.2M x 3072 (that path took ~months, see the
+  # general "arangodb" entry above for the full nLists sweep it uses on smaller
+  # datasets).
+  #   run: python run.py --local --algorithm arangodb-ivf --dataset hotpotqa-3072-angular
+  - base_args: ['@metric']
+    constructor: ArangoDB
+    disabled: false
+    docker_tag: ann-benchmarks-arangodb
+    module: ann_benchmarks.algorithms.arangodb
+    name: arangodb-ivf
+    run_groups:
+      base:
+        args: [[4096]]
+        query_args: [[1, 8, 16, 32, 64, 128, 256, 512]]
+
   # Composite index: HNSW coarse quantizer + scalar quantization of the
   # residuals. Dimension-agnostic, so the same sweep works for both
   # glove-100-angular and sift-128-euclidean.
@@ -23,10 +43,14 @@ float:
     module: ann_benchmarks.algorithms.arangodb
     name: arangodb-ivf-hnsw-sq
     run_groups:
+      # Matched-to-Qdrant config: HNSW32 coarse quantizer + SQ8 (int8) residual
+      # quantization, single nLists build to keep the 5.2M-vector build
+      # tractable. nProbe traces the recall/QPS frontier. Add 16384 / SQ4 back
+      # once a first comparable point lands.
       sq:
         args:
-          - [1024, 4096, 16384]
-          - ["IVF{}_HNSW32,SQ8", "IVF{}_HNSW32,SQ4"]
+          - [4096]
+          - ["IVF{}_HNSW32,SQ8"]
         query_args: [[1, 5, 10, 20, 50, 100, 200]]
 
   # Composite index: HNSW coarse quantizer + product quantization, sized for
