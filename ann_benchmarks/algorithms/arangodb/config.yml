@@ -13,14 +13,23 @@ float:
         query_args: [[1, 5, 10, 50, 100, 200]]
 
   # Pure IVF-flat, sized for the 5.2M-vector hotpotqa corpus: a single
-  # nLists=4096 build (~sqrt(N)) with an nProbe query sweep, mirroring Qdrant's
+  # nLists=16384 build with an nProbe query sweep, mirroring Qdrant's
   # single-build + query-knob structure for a point-for-point comparison. No
-  # quantization -> full-precision distances within the probed cells. nProbe is
-  # kept well below nLists; high nProbe on small nLists degenerates into a
-  # brute-force full scan of 5.2M x 3072 (that path took ~months, see the
-  # general "arangodb" entry above for the full nLists sweep it uses on smaller
-  # datasets).
-  #   run: python run.py --local --algorithm arangodb-ivf --dataset hotpotqa-3072-angular
+  # quantization -> full-precision distances within the probed cells.
+  #
+  # nLists=16384 is ArangoDB's *own* auto-scaling default for this corpus size:
+  # its tiered spec (from autofaiss) uses a fixed 16384 for 1M <= N < 10M (see
+  # NListsScalingSpec in VectorIndexDefinition.h). Benchmarking the default is
+  # more representative than the old under-partitioned 4096 build, and quarters
+  # the vectors-per-cell so each fixed-nProbe query scans ~4x fewer vectors.
+  #
+  # nProbe is rescaled ~4x to keep coverage (nProbe/nLists) spanning the same
+  # low->high recall frontier as before; the top point (1024/16384 = 6.25%) is
+  # the slowest but stays well below a brute-force full scan. nProbe=2048 was
+  # dropped: on the 10k set it alone cost ~8.6h and IVF-flat recall is expected
+  # to saturate well before it. Kept on the 10k query set so the sweep finishes
+  # in hours, not days.
+  #   run: python run.py --local --algorithm arangodb-ivf --dataset hotpotqa-3072-angular-10k
   - base_args: ['@metric']
     constructor: ArangoDB
     disabled: false
@@ -29,8 +38,8 @@ float:
     name: arangodb-ivf
     run_groups:
       base:
-        args: [[4096]]
-        query_args: [[1, 8, 16, 32, 64, 128, 256, 512]]
+        args: [[16384]]
+        query_args: [[1, 16, 64, 128, 256, 512, 1024]]
 
   # Composite index: HNSW coarse quantizer + scalar quantization of the
   # residuals. Dimension-agnostic, so the same sweep works for both
