@@ -39,7 +39,7 @@ float:
     run_groups:
       base:
         args: [[16384]]
-        query_args: [[1, 16, 64, 128, 256, 512, 1024]]
+        query_args: [[1, 16, 32, 64, 128, 256, 512]]
 
   # Composite index: HNSW coarse quantizer + scalar quantization of the
   # residuals. Dimension-agnostic, so the same sweep works for both
