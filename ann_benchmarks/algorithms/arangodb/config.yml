@@ -69,7 +69,7 @@ float:
           - [1.2]         # alpha
           - [100]         # buildSearchListSize (build-time beam width L)
           - ["PQ256x8"]   # quantization (M must divide the dimension)
-        query_args: [[100, 150, 200, 300, 500, 800, 1200]]  # searchListSize
+        query_args: [[100, 150, 200, 300, 500, 800]]  # searchListSize
 
   # Composite index: HNSW coarse quantizer + scalar quantization of the
   # residuals. Dimension-agnostic, so the same sweep works for both
