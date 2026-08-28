@@ -41,6 +41,36 @@ float:
         args: [[16384]]
         query_args: [[1, 16, 64, 128, 256, 512, 1024]]
 
+  # Vector-graph index: a Vamana/DiskANN graph over PQ-compressed vectors,
+  # sized for the hotpotqa corpus (dimension 3072). The graph is built once
+  # (maxDegree=64, alpha=1.2, buildSearchListSize=100, quantization=PQ256x8 —
+  # ArangoDB's own defaults) and the query sweep varies searchListSize to trace
+  # the recall/QPS frontier. Reranking is always on (handled in the module), so
+  # PQ-approximate candidates are re-scored against full-precision vectors.
+  #
+  # PQ<M> requires M to divide the dimension: 3072 = 256*12, so PQ256x8 fits
+  # hotpotqa. For other datasets pick an M that divides their dimension.
+  #
+  # Build the index once, then re-run the sweep without rebuilding by exporting
+  # ANN_BENCHMARKS_ARANGO_SKIP_BUILD=1 (assumes the collection + index are
+  # already present on the server).
+  #   run: python run.py --local --algorithm arangodb-vector-graph \
+  #        --dataset hotpotqa-3072-angular-10k
+  - base_args: ['@metric']
+    constructor: ArangoDBVectorGraph
+    disabled: false
+    docker_tag: ann-benchmarks-arangodb
+    module: ann_benchmarks.algorithms.arangodb
+    name: arangodb-vector-graph
+    run_groups:
+      base:
+        args:
+          - [64]          # maxDegree (R)
+          - [1.2]         # alpha
+          - [100]         # buildSearchListSize (build-time beam width L)
+          - ["PQ256x8"]   # quantization (M must divide the dimension)
+        query_args: [[100, 150, 200, 300, 500, 800, 1200]]  # searchListSize
+
   # Composite index: HNSW coarse quantizer + scalar quantization of the
   # residuals. Dimension-agnostic, so the same sweep works for both
   # glove-100-angular and sift-128-euclidean.
