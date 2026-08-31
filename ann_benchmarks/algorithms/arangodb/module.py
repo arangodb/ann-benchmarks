@@ -35,8 +35,15 @@ with `run.py --local`) or is launched locally by this module:
     ANN_BENCHMARKS_ARANGO_PORT      default: 8529
     ANN_BENCHMARKS_ARANGO_USER      default: root
     ANN_BENCHMARKS_ARANGO_PASSWORD  default: "" (empty)
-    ANN_BENCHMARKS_ARANGO_DB        default: _system
-    ANN_BENCHMARKS_ARANGO_TIMEOUT   default: 3600 (seconds)
+    ANN_BENCHMARKS_ARANGO_DB          default: _system
+    ANN_BENCHMARKS_ARANGO_COLLECTION  default: items
+    ANN_BENCHMARKS_ARANGO_INDEX_NAME  default: per-index (vector_idx / vector_graph_idx)
+    ANN_BENCHMARKS_ARANGO_TIMEOUT     default: 3600 (seconds)
+
+The DB / COLLECTION / INDEX_NAME triple lets a run point at a pre-built index
+that lives in a non-default location; combined with SKIP_BUILD below this reuses
+an index someone else loaded (e.g. DB=vectorRecallDb, COLLECTION=vectorColl,
+INDEX_NAME=vector_graph_cosine).
 
 Building the index runs synchronously (inBackground: False) and trains the
 quantizer / builds the graph, which on a full training set takes far longer than
@@ -106,6 +113,7 @@ class _ArangoBase(BaseANN):
         self._user = _env("USER", "root")
         self._password = _env("PASSWORD", "") or ""
         self._db_name = _env("DB", "_system")
+        self._collection = _env("COLLECTION", COLLECTION)
         self._request_timeout = int(_env("TIMEOUT", "3600"))
 
     def _connect(self):
@@ -162,10 +170,10 @@ class _ArangoBase(BaseANN):
         collection. Reloading millions of high-dimensional vectors per step
         dominated the runtime otherwise. Returns the collection."""
         db = self._db
-        if db.has_collection(COLLECTION):
-            coll = db.collection(COLLECTION)
+        if db.has_collection(self._collection):
+            coll = db.collection(self._collection)
         else:
-            coll = db.create_collection(COLLECTION)
+            coll = db.create_collection(self._collection)
 
         existing = coll.count()
         if existing == len(X):
@@ -197,16 +205,16 @@ class _ArangoBase(BaseANN):
         """Skip-build path: bind to the collection and index already present on
         the server, failing fast if either is missing."""
         db = self._db
-        if not db.has_collection(COLLECTION):
+        if not db.has_collection(self._collection):
             raise RuntimeError(
                 "ANN_BENCHMARKS_ARANGO_SKIP_BUILD is set but collection "
-                f"'{COLLECTION}' does not exist; build the index first"
+                f"'{self._collection}' does not exist; build the index first"
             )
-        coll = db.collection(COLLECTION)
+        coll = db.collection(self._collection)
         if not any(idx.get("name") == index_name for idx in coll.indexes()):
             raise RuntimeError(
                 "ANN_BENCHMARKS_ARANGO_SKIP_BUILD is set but index "
-                f"'{index_name}' is missing on collection '{COLLECTION}'; "
+                f"'{index_name}' is missing on collection '{self._collection}'; "
                 "build the index first"
             )
         print(
@@ -259,11 +267,12 @@ class ArangoDB(_ArangoBase):
         self._factory = factory
         self._training_iterations = self.TRAINING_ITERATIONS
         self._n_probe = None
+        self._index_name = _env("INDEX_NAME", self.INDEX_NAME)
 
     def fit(self, X):
         self._prepare()
         if self._skip_build:
-            self._reuse_prebuilt(self.INDEX_NAME)
+            self._reuse_prebuilt(self._index_name)
             return
         coll = self._load_data(X)
         dim = X.shape[1]
@@ -271,7 +280,7 @@ class ArangoDB(_ArangoBase):
         # A previous sweep step may have left a vector index behind; drop it so
         # the current nLists/factory takes effect. The data underneath is
         # untouched.
-        self._drop_index(coll, self.INDEX_NAME)
+        self._drop_index(coll, self._index_name)
 
         # Creating the index trains the IVF quantizer, so it must run after the
         # data has been loaded. add_index passes the raw definition through to
@@ -297,7 +306,7 @@ class ArangoDB(_ArangoBase):
         coll.add_index(
             {
                 "type": "vector",
-                "name": self.INDEX_NAME,
+                "name": self._index_name,
                 "fields": ["vector"],
                 "inBackground": False,
                 "params": params,
@@ -309,7 +318,7 @@ class ArangoDB(_ArangoBase):
     def set_query_arguments(self, n_probe):
         self._n_probe = n_probe
         self._query = (
-            "FOR d IN items "
+            f"FOR d IN {self._collection} "
             f"SORT {self._func}(d.vector, @qp, {{nProbe: {int(n_probe)}}}) {self._sort_dir} "
             "LIMIT @n RETURN d._key"
         )
@@ -345,18 +354,19 @@ class ArangoDBVectorGraph(_ArangoBase):
         self._build_search_list_size = build_search_list_size
         self._quantization = quantization
         self._search_list_size = None
+        self._index_name = _env("INDEX_NAME", self.INDEX_NAME)
 
     def fit(self, X):
         self._prepare()
         if self._skip_build:
-            self._reuse_prebuilt(self.INDEX_NAME)
+            self._reuse_prebuilt(self._index_name)
             return
         coll = self._load_data(X)
         dim = X.shape[1]
 
         # A previous sweep step may have left a graph index behind; drop it so
         # the current build parameters take effect. The data is untouched.
-        self._drop_index(coll, self.INDEX_NAME)
+        self._drop_index(coll, self._index_name)
 
         print(
             "creating vector-graph index "
@@ -373,7 +383,7 @@ class ArangoDBVectorGraph(_ArangoBase):
         coll.add_index(
             {
                 "type": "vector-graph",
-                "name": self.INDEX_NAME,
+                "name": self._index_name,
                 "fields": ["vector"],
                 "inBackground": False,
                 "params": {
@@ -394,7 +404,7 @@ class ArangoDBVectorGraph(_ArangoBase):
         # rerank is always on: PQ distances are approximate, so the graph's
         # candidates are re-scored against the full-precision vectors.
         self._query = (
-            "FOR d IN items "
+            f"FOR d IN {self._collection} "
             f"SORT {self._func}(d.vector, @qp, "
             f"{{searchListSize: {int(search_list_size)}, rerank: true}}) "
             f"{self._sort_dir} "
