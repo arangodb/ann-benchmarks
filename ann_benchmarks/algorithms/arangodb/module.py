@@ -26,7 +26,7 @@ with `run.py --local`) or is launched locally by this module:
     ANN_BENCHMARKS_ARANGO_USER      default: root
     ANN_BENCHMARKS_ARANGO_PASSWORD  default: "" (empty)
     ANN_BENCHMARKS_ARANGO_DB        default: _system
-    ANN_BENCHMARKS_ARANGO_TIMEOUT   default: 3600 (seconds)
+    ANN_BENCHMARKS_ARANGO_TIMEOUT   default: 9000 (seconds)
 
 Building the vector index runs synchronously (inBackground: False) and trains
 the IVF quantizer, which on a full training set takes far longer than the
@@ -94,7 +94,7 @@ class ArangoDB(BaseANN):
         self._user = _env("USER", "root")
         self._password = _env("PASSWORD", "") or ""
         self._db_name = _env("DB", "_system")
-        self._request_timeout = int(_env("TIMEOUT", "3600"))
+        self._request_timeout = int(_env("TIMEOUT", "9000"))
 
     def _connect(self):
         url = f"http://{self._host}:{self._port}"
